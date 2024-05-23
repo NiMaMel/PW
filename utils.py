@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score,accuracy_score, f1_score
 from collections import defaultdict
+
 # 1. Datasplit Methods
 
 def data_split(df, seed):
@@ -60,58 +61,75 @@ def train_model(config, writer, train_loader, val_loader, device, BATCH_SIZE):
     PATIENCE = config['patience']
     log_interval = config['log_interval']
     save_path = config['save_path']
+    val_interval = config['val_interval']  
     
     best_val_score = None
-    accuracy = 0.
-    f1 = 0.
+    auc= 0.
     daucPR = 0.
     pat_log = 0
+    avg_valLoss = 0 
+    avg_trainLoss = 0
     
     for epoch in range(MAX_EPOCHS):
+        
         losses = []
+        val_losses = []
         model.train(True)
+        
         for batch, data_ in enumerate(train_loader):
             # reset gradients
             optimizer.zero_grad()
 
             # compute output
             q, p, n, t = data_["query_mol"].to(device),data_["p_supp"].to(device),data_["n_supp"].to(device),data_["task_id"].to(device)
-            preds = model(q,p,n, train=False)
+            #preds = model(q,p,n, train=False)
+            preds = model(q,p,n)
             # compute loss
             loss = criterion(preds, data_['query_label'].to(device)) 
             loss.backward()
             optimizer.step()
             losses.append(loss.cpu().detach())
-
+            avg_trainLoss = np.mean(losses)
+            
             # plotting
             if batch % log_interval == 0 or batch == BATCH_SIZE - 1:
                 out = f'epoch:{epoch + 1}/{MAX_EPOCHS} batches:{batch:>04d}/{len(train_loader) - 1}'
-                #out += f' avg-loss:{np.mean(losses)} acc-val:{accuracy}'
-                out += f' avg-loss:{np.mean(losses)} val-dauc_pr:{daucPR}'
-                #out += f' avg-loss:{np.mean(losses)} acc-val:{f1}'
-
+                out += f' avg-train_loss:{avg_trainLoss:.8f}, avg-val_loss:{avg_valLoss:.8f}, val-auc:{auc:.8f}, val-dauc_pr:{daucPR:.8f}'
+                
                 # overwrite what's already been written
                 sys.stdout.write('\r' + ' ' * 400)
                 # write 'out' to stdout
                 sys.stdout.write(f'\r{out}')
                 sys.stdout.flush()
-
+                
+        # compute validation loss
+        if (epoch + 1) % val_interval == 0:
+            model.eval() 
+            with torch.no_grad():
+                for vdata_ in val_loader:
+                    q, p, n, t = vdata_["query_mol"].to(device), vdata_["p_supp"].to(device), vdata_["n_supp"].to(device), vdata_["task_id"].to(device)
+                    #preds = model(q, p, n)  
+                    preds = model(q, p, n, train=False)  
+                    val_loss = criterion(preds, vdata_['query_label'].to(device))
+                    val_losses.append(val_loss.cpu().detach())
+                    avg_valLoss = np.mean(val_losses)
+ 
         del preds, loss
 
-        # validation
-        #accuracy , f1 = acc_f1(model, val_loader, device)
+        # eval step on val-set
         daucPR = dauc_pr(model, val_loader, device)
-
+        auc = auc_score(model, val_loader, device)
+ 
         # logging tensorboard
         writer.add_scalar(f"{model.__class__.__name__} training avg-loss", np.mean(losses), epoch)
-        #writer.add_scalar(f"{model.__class__.__name__} validation acc", accuracy, epoch)
+        if len(val_losses) > 0:
+            writer.add_scalar(f"{model.__class__.__name__} validation avg-loss", np.mean(val_losses), epoch)
+        writer.add_scalar(f"{model.__class__.__name__} validation auc", auc, epoch)
         writer.add_scalar(f"{model.__class__.__name__} validation dauc_pr", daucPR, epoch)
 
         # saving best model
-        #if best_val_score is None or best_val_score < accuracy:
-        if best_val_score is None or best_val_score < daucPR: 
-            #best_val_score = accuracy
-            best_val_score = daucPR
+        if best_val_score is None or best_val_score < auc: 
+            best_val_score = auc
             torch.save(model.state_dict(), save_path)
             pat_log = 0
         else:
@@ -185,44 +203,9 @@ def flatten(li):
     """
     Flattens a given list.
     used in acc_f1 and evaluate model
+    # not used anymore
     """
     return [item for sublist in li for item in sublist]
-    
-"""
-deprecated - was replaced a daucpr evaluation per task
-def dauc_pr(model, loader,device):
-
-    #Return daucpr of a given model and dataloader.
-    #To Do: Evaluate per Task and return mean
-    
-    model.train(False)
-    predictions = []
-    targets = []
-    threshold = 0.5
-    for batch, data_ in enumerate(loader):
-        # compute output
-        q, p, n, t = data_["query_mol"].to(device), data_["p_supp"].to(device), data_["n_supp"].to(device),data_["task_id"].to(device)
-        preds = model(q, p, n, train=False)
-        pred_labels = (preds >= threshold).float()
-        predictions.append(pred_labels.cpu())
-        targets.append(data_['query_label'].cpu())
-
-    # Flatten predictions and targets
-    predictions, targets = flatten(predictions), flatten(targets)
-
-    # get n inactives and n actives for daucPR
-    _, counts = torch.unique(torch.tensor(targets), return_counts=True)
-    n_actives = counts[0].numpy().astype(np.float64)
-    n_inactives = counts[1].numpy().astype(np.float64)
-    n_total = n_actives + n_inactives
-    random_clf_auprc = n_actives / n_total
-    
-    # daucPR
-    aucPR = average_precision_score(targets, predictions)
-    daucPR = aucPR - random_clf_auprc
-    
-    return daucPR
-"""
 
 def dauc_pr(model, loader, device):
     """
@@ -231,23 +214,22 @@ def dauc_pr(model, loader, device):
     model.train(False)
     task_predictions = defaultdict(list)
     task_targets = defaultdict(list)
-    threshold = 0.5
+    #threshold = 0.5 no thresholding fopr auc and daucPR
 
     for batch, data_ in enumerate(loader):
         # compute output
         q, p, n, t = data_["query_mol"].to(device), data_["p_supp"].to(device), data_["n_supp"].to(device),data_["task_id"].to(device)
-        preds = model(q, p, n, train=False)
-        pred_labels = (preds >= threshold).float()
+        predictions = model(q, p, n, train=False)
 
         # Append predictions and targets to the corresponding task lists
-        for task_id, pred, target in zip(t.cpu().numpy(), pred_labels.cpu().numpy(), data_['query_label'].cpu().numpy()):
+        for task_id, pred, target in zip(t.cpu().numpy(), predictions.detach().cpu().numpy(), data_['query_label'].cpu().numpy()):
             task_predictions[task_id].append(pred)
             task_targets[task_id].append(target)
 
     # Calculate dAUC PR for each task
     task_dauc_prs = []
     for task_id in task_predictions:
-        preds = task_predictions[task_id]
+        preds = task_predictions[task_id] 
         targets = task_targets[task_id]
 
         # Get the number of actives and inactives
@@ -256,7 +238,7 @@ def dauc_pr(model, loader, device):
         n_inactives = counts[0].numpy().astype(np.float64)
         n_total = n_actives + n_inactives
         random_clf_auprc = n_actives / n_total
-
+        
         # dAUC PR
         aucPR = average_precision_score(targets, preds)
         daucPR = aucPR - random_clf_auprc
@@ -273,23 +255,22 @@ def auc_score(model, loader, device):
     model.train(False)
     task_predictions = defaultdict(list)
     task_targets = defaultdict(list)
-    threshold = 0.5
+    #threshold = 0.5 no thresholding fopr auc and daucPR
 
     for batch, data_ in enumerate(loader):
         # compute output
         q, p, n, t = data_["query_mol"].to(device), data_["p_supp"].to(device), data_["n_supp"].to(device),data_["task_id"].to(device)
-        preds = model(q, p, n, train=False)
-        pred_labels = (preds >= threshold).float()
+        predictions = model(q, p, n, train=False)
 
         # Append predictions and targets to the corresponding task lists
-        for task_id, pred, target in zip(t.cpu().numpy(), pred_labels.cpu().numpy(), data_['query_label'].cpu().numpy()):
+        for task_id, pred, target in zip(t.cpu().numpy(), predictions.detach().cpu().numpy(), data_['query_label'].cpu().numpy()):
             task_predictions[task_id].append(pred)
             task_targets[task_id].append(target)
 
     # Calculate auc for each task
     task_aucs = []
     for task_id in task_predictions:
-        preds = task_predictions[task_id]
+        preds = task_predictions[task_id] 
         targets = task_targets[task_id]
 
         # auc score
@@ -379,8 +360,8 @@ def eval_rf(y_hat,y_true):
 
         # for daucPr compute random_clf_auprc
         _, counts = np.unique(trues, return_counts=True)
-        n_inactives = counts[0]#.numpy().astype(np.float64)
-        n_actives = counts[1]#.numpy().astype(np.float64)
+        n_inactives = counts[0]
+        n_actives = counts[1]
         n_total = n_actives + n_inactives
         random_clf_auprc = n_actives / n_total
 

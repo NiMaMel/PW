@@ -10,10 +10,13 @@ class Model(nn.Module):
         
         # 1st encoder in a siamese fashion
         encoder = []
+        
         for _ in range(num_layers):
-            encoder.append(nn.Linear(input_dim, input_dim))
+            #encoder.append(nn.Linear(input_dim, input_dim)) 
+            encoder.append(nn.Linear(input_dim, output_dim)) # added # add hidden check 1.5x size of input
             encoder.append(nn.SELU())
             encoder.append(nn.AlphaDropout(p=p))
+            input_dim = output_dim # added
 
         # Final linear layer
         encoder.append(nn.Linear(input_dim, output_dim)) 
