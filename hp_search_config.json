@@ -1,0 +1,10 @@
+{
+    "opt_lr": 0.0010016728741760665,
+    "weight_decay": 4.4721740791833794e-05,
+    "batch_size": 16,
+    "hidden_dim": 2661,
+    "output_dim": 174,
+    "num_layers": 1,
+    "p": 0.21015322364897487,
+    "input_dim": 2248
+}

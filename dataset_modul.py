@@ -6,13 +6,18 @@ from torch.utils.data import Dataset
 
 class Dataset(Dataset):
 
-    def __init__(self, data, df, triplet_df, supp=8, train = True):
+    def __init__(self, data, df, triplet_df, supp=8, train = True,seed=None):
         
         self.data = data
         self.df = df #sider
         self.triplet_df = triplet_df # cols: mol_id,target_id,label 
         self.supp = supp
         self.train = train
+        self.seed = seed
+
+        if seed is not None:
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
         
         if not self.train:
             

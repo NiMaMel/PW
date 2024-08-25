@@ -1,20 +1,26 @@
 import sys
 import numpy as np
 import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
 import torch as torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+
+from sklearn.manifold import TSNE
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score,accuracy_score, f1_score
-from collections import defaultdict
+
 
 # 1. Datasplit Methods
 
 def data_split(df, seed):
-
-    np.random.seed(seed)
     
+    np.random.seed(seed)
+        
     # Unique tasks
     unique_targets = df['target_id'].unique()
     
@@ -41,9 +47,9 @@ def data_split(df, seed):
     test_triplet = df[(df['target_id'].isin(test_targets))]
     
     # Display the lengths of the sets
-    print(f"Train set length: {len(train_triplet)}")
-    print(f"Validation set length: {len(val_triplet)}")
-    print(f"Test set length: {len(test_triplet)}")
+    #print(f"Train set length: {len(train_triplet)}")
+    #print(f"Validation set length: {len(val_triplet)}")
+    #print(f"Test set length: {len(test_triplet)}")
 
     return train_triplet, val_triplet, test_triplet
 
@@ -64,10 +70,11 @@ def train_model(config, writer, train_loader, val_loader, device, BATCH_SIZE):
     val_interval = config['val_interval']  
     
     best_val_score = None
+    val_loss = 0
     auc= 0.
     daucPR = 0.
     pat_log = 0
-    avg_valLoss = 0 
+    avg_valLoss = 0
     avg_trainLoss = 0
     
     for epoch in range(MAX_EPOCHS):
@@ -82,7 +89,6 @@ def train_model(config, writer, train_loader, val_loader, device, BATCH_SIZE):
 
             # compute output
             q, p, n, t = data_["query_mol"].to(device),data_["p_supp"].to(device),data_["n_supp"].to(device),data_["task_id"].to(device)
-            #preds = model(q,p,n, train=False)
             preds = model(q,p,n)
             # compute loss
             loss = criterion(preds, data_['query_label'].to(device)) 
@@ -95,41 +101,45 @@ def train_model(config, writer, train_loader, val_loader, device, BATCH_SIZE):
             if batch % log_interval == 0 or batch == BATCH_SIZE - 1:
                 out = f'epoch:{epoch + 1}/{MAX_EPOCHS} batches:{batch:>04d}/{len(train_loader) - 1}'
                 out += f' avg-train_loss:{avg_trainLoss:.8f}, avg-val_loss:{avg_valLoss:.8f}, val-auc:{auc:.8f}, val-dauc_pr:{daucPR:.8f}'
-                
+
                 # overwrite what's already been written
                 sys.stdout.write('\r' + ' ' * 400)
                 # write 'out' to stdout
                 sys.stdout.write(f'\r{out}')
                 sys.stdout.flush()
-                
+
         # compute validation loss
         if (epoch + 1) % val_interval == 0:
             model.eval() 
             with torch.no_grad():
                 for vdata_ in val_loader:
                     q, p, n, t = vdata_["query_mol"].to(device), vdata_["p_supp"].to(device), vdata_["n_supp"].to(device), vdata_["task_id"].to(device)
-                    #preds = model(q, p, n)  
                     preds = model(q, p, n, train=False)  
                     val_loss = criterion(preds, vdata_['query_label'].to(device))
                     val_losses.append(val_loss.cpu().detach())
                     avg_valLoss = np.mean(val_losses)
- 
+
         del preds, loss
 
         # eval step on val-set
         daucPR = dauc_pr(model, val_loader, device)
         auc = auc_score(model, val_loader, device)
- 
+
+        # choose evaluation metric for early stopping
+        stopping_metric = daucPR #auc #daucPR #val_loss -> (daucPR best results with weight decay for AUC and daucPR)
+
         # logging tensorboard
-        writer.add_scalar(f"{model.__class__.__name__} training avg-loss", np.mean(losses), epoch)
+        writer.add_scalar(f"{model.__class__.__name__}Average Train Loss", np.mean(losses), epoch)
         if len(val_losses) > 0:
-            writer.add_scalar(f"{model.__class__.__name__} validation avg-loss", np.mean(val_losses), epoch)
-        writer.add_scalar(f"{model.__class__.__name__} validation auc", auc, epoch)
-        writer.add_scalar(f"{model.__class__.__name__} validation dauc_pr", daucPR, epoch)
+            writer.add_scalar(f"{model.__class__.__name__} Average Valiadation Loss", np.mean(val_losses), epoch)
+        writer.add_scalar(f"{model.__class__.__name__} Validation AUC", auc, epoch)
+        writer.add_scalar(f"{model.__class__.__name__} Validation ΔAUC-PR", daucPR, epoch)
 
         # saving best model
-        if best_val_score is None or best_val_score < auc: 
-            best_val_score = auc
+            # think about adapting the stopping criteria: relative improvement (e.g. at least 1%), min. improvement threshhold (e.g stopping_metric > best_val_score + delta)
+            # also more patience in the beginning and less once it seems stable (e.g. after 20 epochs)
+        if best_val_score is None or best_val_score < stopping_metric:
+            best_val_score = stopping_metric
             torch.save(model.state_dict(), save_path)
             pat_log = 0
         else:
@@ -139,8 +149,7 @@ def train_model(config, writer, train_loader, val_loader, device, BATCH_SIZE):
         if pat_log == PATIENCE:
             break
 
-    print("Finished training...")
-
+    print("\nFinished training...")
 
 def train_rf(df,data,triplet,seed,n_estimators,shuffle = False):
     
@@ -330,15 +339,15 @@ def combined_metrics(model, loader, device):
 
     # store them in a pd df
     metrics_dict = {
-    'Accuracy': acc,
-    'F1 Score': f1,
-    'AUC': auc,
-    'D-AUC PR': daucPr
+    'Accuracy': np.round(acc,4),
+    'F1 Score': np.round(f1,4),
+    'AUC': np.round(auc,4),
+    'D-AUC PR': np.round(daucPr,4),
     }
 
     # Convert the dictionary to a pandas DataFrame
     return pd.DataFrame([metrics_dict])
-    
+
 def eval_rf(y_hat,y_true):
 
     # Initialize lists to store metrics for each task
@@ -376,11 +385,76 @@ def eval_rf(y_hat,y_true):
     
     # Create a DataFrame to store metrics for each task
     metrics_dict = {
-        'Accuracy': np.mean(accuracies),
-        'F1 Score': np.mean(f1_scores),
-        'AUC': np.mean(auc_scores),
-        'D-AUC PR': np.mean(dauc_pr_scores)
+        'Accuracy': np.round(np.mean(accuracies),4),
+        'F1 Score': np.round(np.mean(f1_scores),4),
+        'AUC': np.round(np.mean(auc_scores),4),
+        'D-AUC PR': np.round(np.mean(dauc_pr_scores),4)
         }
     
     # Convert the dictionary to a pandas DataFrame
-    return pd.DataFrame([metrics_dict]) 
+    return pd.DataFrame([metrics_dict])
+
+
+def mean_scores(val_scores, test_scores, rf_scores,output_csv_path):
+
+    # write results per seed to csv's
+    val_scores.to_csv(f"results/validation_{output_csv_path}", index=False)
+    test_scores.to_csv(f"results/test_{output_csv_path}", index=False)
+    rf_scores.to_csv(f"results/rf_{output_csv_path}", index=False)
+    
+    # Compute mean scores excluding the 'Seed' column
+    val_scores_mean = val_scores.drop(columns=['Seed']).mean().to_frame().T
+    test_scores_mean = test_scores.drop(columns=['Seed']).mean().to_frame().T
+    rf_scores_mean = rf_scores.drop(columns=['Seed']).mean().to_frame().T
+
+    # save results to csv
+    combined_scores = pd.concat([val_scores_mean, test_scores_mean, rf_scores_mean], ignore_index=True)
+    combined_scores.index = ['fs-val', 'fs-test', 'rf']
+    combined_scores.to_csv(f"results/avg_{output_csv_path}")
+
+    # Set index name to 'Avg over Seeds'
+    val_scores_mean.index = ['Avg over Seeds']
+    test_scores_mean.index = ['Avg over Seeds']
+    rf_scores_mean.index = ['Avg over Seeds']
+
+    return val_scores_mean, test_scores_mean, rf_scores_mean
+
+# 4. Visualizations
+
+def plot_tsne_embeddings(embed, encoded_embed, labels, task_name, title, seed, save = False):
+    tsne = TSNE(n_components=2, random_state=seed)
+
+    X_tsne_embed = tsne.fit_transform(embed)         
+    X_tsne_encoded = tsne.fit_transform(encoded_embed)
+    
+    fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+
+    # Setting color palette
+    palette = sns.color_palette("colorblind")
+    palette_dict = {0: palette[0], 1: palette[4]}  # Assuming 0 is Inactive and 1 is Active
+
+    # Plotting t-SNE of Unscaled Embeddings
+    sns.scatterplot(x=X_tsne_embed[:, 0], y=X_tsne_embed[:, 1], hue=labels, palette=palette_dict, alpha=0.7, s=50, ax=axs[0])
+    axs[0].set_title('Embeddings before Training')
+    axs[0].set_xlabel('TSNE-Component 1')
+    axs[0].set_ylabel('TSNE-Component 2')
+    handles, _ = axs[0].get_legend_handles_labels()
+    axs[0].legend(handles=handles, labels=['Inactive', 'Active'], title=f'{task_name}', loc='upper right')
+    axs[0].grid(True)
+    
+    # Plotting t-SNE of Scaled Embeddings
+    sns.scatterplot(x=X_tsne_encoded[:, 0], y=X_tsne_encoded[:, 1], hue=labels, palette=palette_dict, alpha=0.7, s=50, ax=axs[1])
+    axs[1].set_title('Embeddings after Training')
+    axs[1].set_xlabel('TSNE-Component 1')
+    axs[1].set_ylabel('TSNE-Component 2')
+    handles, _ = axs[1].get_legend_handles_labels()
+    axs[1].legend(handles=handles, labels=['Inactive', 'Active'], title=f'{task_name}', loc='upper right')
+    axs[1].grid(True)
+
+    plt.suptitle(title)
+    plt.tight_layout()
+
+    if save:
+        plt.savefig('visualizations/embed_comparison.png')
+    
+    plt.show()

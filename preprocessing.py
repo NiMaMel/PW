@@ -35,7 +35,7 @@ def preprocessing(df):
         ecfps.append(fp)
     
     # check number of mols and shape of fingerprints
-    print(f"nMols: {len(mols)}")
+    #print(f"nMols: {len(mols)}")
     
     ### create descriptors -> shape (1427, 200 )
     
@@ -47,8 +47,8 @@ def preprocessing(df):
     
     for i,mol in enumerate(mols):
 
-        if i % 400 == 0:
-            print(f'... processing mol {i} of {total_mols}')
+        #if i % 400 == 0:
+        #    print(f'... processing mol {i} of {total_mols}')
     
         descrs = list()
         for descr in Descriptors._descList:
@@ -61,7 +61,7 @@ def preprocessing(df):
 
     rdkit_descriptors = np.array(rdkit_descriptors) # convert to numpy 
 
-    print("... done") 
+    print("... done\n")
     
 
     ### compute quantils and scale desriptors # only train data!
@@ -76,7 +76,7 @@ def preprocessing(df):
         quantils = ecdf(raw_values)
         rdkit_descriptors_quantils[:,column] = quantils
         
-    print(f"min and max quantil: {np.min(rdkit_descriptors_quantils),np.max(rdkit_descriptors_quantils)}")
+    #print(f"min and max quantil: {np.min(rdkit_descriptors_quantils),np.max(rdkit_descriptors_quantils)}")
     
     ### Stack and Scale -> shape (1427,2248)
     scaler = StandardScaler()
@@ -84,8 +84,8 @@ def preprocessing(df):
     data = np.hstack([ecfps, rdkit_descriptors_quantils])
     data = scaler.fit_transform(data)
     
-    print(f"min and max of data after scaling: {np.min(data),np.max(data)}")
-    print(f"data.shape: {data.shape}")
+    #print(f"min and max of data after scaling: {np.min(data),np.max(data)}")
+    #print(f"data.shape: {data.shape}\n")
     
     return data
     
