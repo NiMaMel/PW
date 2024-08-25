@@ -1,8 +1,0 @@
-{
-    "opt_lr": 0.001,
-    "batch_size": 32,
-    "input_dim": 2248,
-    "output_dim": 1124,
-    "num_layers": 2,
-    "p": 0.1
-}
